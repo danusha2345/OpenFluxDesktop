@@ -1,3 +1,7 @@
+Windows 2.6.4: для исправления ошибки WFP «The specified group does not exist»
+выберите исправленное отдельное ядро из [hotfix 0.7.3-danik.2](https://github.com/danusha2345/OpenFlux/releases/tag/v0.7.3-danik.2)
+в настройках собственного пути ядра. Профили и ключ менять не нужно.
+
 ## Наши исправления полного туннеля
 
 Linux: режим TUN с запросом прав только для ядра через pkexec; нужны ip,
