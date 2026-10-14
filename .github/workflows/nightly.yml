@@ -140,6 +140,9 @@ jobs:
           ref: ${{ needs.plan.outputs.sha }}
           submodules: recursive
 
+      - name: Select pinned fork core
+        run: bash scripts/sync-core.sh
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: OpenFlux/go.mod

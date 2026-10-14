@@ -11,6 +11,7 @@ import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowState
 import androidx.compose.ui.window.application
+import androidx.compose.ui.window.isTraySupported
 import io.openflux.desktop.data.AppDirs
 import io.openflux.desktop.model.isActive
 import io.openflux.desktop.model.profile
@@ -38,7 +39,10 @@ private val APP_VERSION = System.getProperty("openflux.version") ?: "dev"
 private fun acquireSingleInstance(): FileLock? {
     val file = AppDirs.runtime.resolve("instance.lock")
     file.parentFile.mkdirs()
-    return runCatching { RandomAccessFile(file, "rw").channel.tryLock() }.getOrNull()
+    val channel = runCatching { RandomAccessFile(file, "rw").channel }.getOrNull() ?: return null
+    val lock = runCatching { channel.tryLock() }.getOrNull()
+    if (lock == null) channel.close()
+    return lock
 }
 
 fun main(args: Array<String>) {
@@ -52,22 +56,30 @@ fun main(args: Array<String>) {
             }
         }
     }
+    val activation = InstanceActivation(AppDirs.runtime)
     if (lock == null) {
-        JOptionPane.showMessageDialog(null, "OpenFlux уже запущен — посмотрите значок в области уведомлений.", "OpenFlux", JOptionPane.INFORMATION_MESSAGE)
+        if (!activation.requestShow()) {
+            JOptionPane.showMessageDialog(null, "Не удалось открыть окно работающего OpenFlux.", "OpenFlux", JOptionPane.ERROR_MESSAGE)
+        }
         exitProcess(0)
     }
+    val instanceLock = lock
 
     val container = createAppContainer(APP_VERSION)
     val stopped = AtomicBoolean(false)
     val stop = { if (stopped.compareAndSet(false, true)) { container.connection.shutdown(); container.phpHosting.close() } }
     // The core and the Windows proxy must not outlive the app, even on logoff or a kill from the task manager.
-    Runtime.getRuntime().addShutdownHook(Thread({ stop() }, "openflux-shutdown"))
+    Runtime.getRuntime().addShutdownHook(Thread({
+        stop()
+        runCatching { instanceLock?.release(); instanceLock?.channel()?.close() }
+    }, "openflux-shutdown"))
 
     val shortcuts = Shortcuts()
     application(exitProcessOnExit = true) {
         val settings by container.settings.settings.collectAsState()
         val state by container.connection.state.collectAsState()
         var visible by remember { mutableStateOf(true) }
+        var activationCount by remember { mutableStateOf(0) }
         val quit = {
             stop()
             exitApplication()
@@ -75,6 +87,16 @@ fun main(args: Array<String>) {
         val windowState = remember {
             val initial = initialWindow(container.settings.settings.value.window)
             WindowState(placement = initial.placement, position = initial.position, size = initial.size)
+        }
+        LaunchedEffect(Unit) {
+            while (true) {
+                if (activation.consumeShowRequest()) {
+                    visible = true
+                    windowState.isMinimized = false
+                    activationCount++
+                }
+                delay(250)
+            }
         }
         // Remember where the window is, for the next start; written once it settles.
         LaunchedEffect(windowState) {
@@ -92,7 +114,7 @@ fun main(args: Array<String>) {
         }
 
         val icon = painterResource(AppIcons.Logo)
-        Tray(
+        if (isTraySupported) Tray(
             icon = icon,
             tooltip = if (state.isActive) "OpenFlux — ${state.profile?.name ?: "подключено"}" else "OpenFlux — отключено",
             onAction = { visible = true },
@@ -109,7 +131,7 @@ fun main(args: Array<String>) {
         )
 
         Window(
-            onCloseRequest = { if (settings.closeToTray) visible = false else quit() },
+            onCloseRequest = { if (hideOnClose(settings.closeToTray, isTraySupported)) visible = false else quit() },
             state = windowState,
             visible = visible,
             title = "OpenFlux",
@@ -117,6 +139,9 @@ fun main(args: Array<String>) {
             onPreviewKeyEvent = shortcuts::handle,
         ) {
             LaunchedEffect(Unit) { window.minimumSize = Dimension(MIN_WINDOW.width.value.toInt(), MIN_WINDOW.height.value.toInt()) }
+            LaunchedEffect(activationCount, visible) {
+                if (visible) { window.toFront(); window.requestFocus() }
+            }
             OpenFluxApp(container, DesktopScrollbars, shortcuts, KcefBrowserViews)
         }
     }

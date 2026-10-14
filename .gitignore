@@ -11,3 +11,9 @@ desktopApp/resources/*/wintun.dll
 
 # Chromium (the built-in browser) leaves these in the working directory.
 MediaDeviceSalts*
+
+.scratch/
+
+.codegraph/
+
+core-revision-local.txt

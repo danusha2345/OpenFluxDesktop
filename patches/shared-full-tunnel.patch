@@ -1,0 +1,141 @@
+diff --git a/src/commonMain/kotlin/io/openflux/desktop/ui/settings/SettingsTab.kt b/src/commonMain/kotlin/io/openflux/desktop/ui/settings/SettingsTab.kt
+index ecf06c3..77875ed 100644
+--- a/src/commonMain/kotlin/io/openflux/desktop/ui/settings/SettingsTab.kt
++++ b/src/commonMain/kotlin/io/openflux/desktop/ui/settings/SettingsTab.kt
+@@ -78,7 +78,7 @@ import org.jetbrains.compose.resources.painterResource
+ 
+ enum class SettingsCategory(val title: String, val subtitle: String, val icon: DrawableResource) {
+     Connection("Подключение", "Режим, порты, автозапуск", AppIcons.Swap),
+-    SystemProxy("Системный прокси", "Весь трафик компьютера через OpenFlux", AppIcons.Routing),
++    SystemProxy("Системный прокси", "Прокси для поддерживающих его программ", AppIcons.Routing),
+     Core("Ядро OpenFlux", "Файл ядра и подробный журнал", AppIcons.Code),
+     Interface("Интерфейс", "Тема, трей, журнал", AppIcons.DarkMode),
+     Experimental("Экспериментальные функции", "То, что ещё проверяется: JS-транспорты", AppIcons.Code),
+diff --git a/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt b/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt
+index e3386b2..e973281 100644
+--- a/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt
++++ b/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt
+@@ -7,6 +7,7 @@ import io.openflux.desktop.data.restrictToOwner
+ import io.openflux.desktop.model.AppSettings
+ import io.openflux.desktop.model.CaptchaPrompt
+ import io.openflux.desktop.ui.BrowserPage
++import io.openflux.desktop.platform.LinuxElevation
+ import io.openflux.desktop.platform.MacElevation
+ import io.openflux.desktop.platform.WindowsCoreElevation
+ import io.openflux.desktop.platform.WindowsElevation
+@@ -197,7 +198,7 @@ class CoreConnectionService(
+             log(LogLevel.Info, "Запуск ядра: ${profile.name} (${current.mode.label}${if (current.mode == ConnectionMode.Exit) ", ${current.exitBackend.label}" else ""})")
+             var command = listOf(core.absolutePath) + launch.arguments
+             val elevate = (current.fullTunnel && current.mode == ConnectionMode.Client &&
+-                ((MacElevation.mac && !MacElevation.root) || (isWindows && !WindowsElevation.elevated))) ||
++                (((MacElevation.mac || LinuxElevation.linux) && !MacElevation.root) || (isWindows && !WindowsElevation.elevated))) ||
+                 (exitL3 && ExitL3.needsUac(System.getProperty("os.name"), WindowsElevation.elevated))
+             val elevated = if (elevate) {
+                 val stamp = System.currentTimeMillis()
+@@ -220,6 +221,11 @@ class CoreConnectionService(
+                         log(LogLevel.Info, "Windows попросит разрешение администратора: ядру нужны права для адаптера Wintun и маршрутов")
+                         Elevated(listOf(out, err), stop, WindowsCoreElevation::cancelled, "Нет разрешения администратора: без него режим «Весь трафик» не запускается")
+                     }
++                } else if (LinuxElevation.linux) {
++                    val out = output(".log")
++                    command = LinuxElevation.command(command, out, stop, app)
++                    log(LogLevel.Info, "Linux спросит пароль администратора: ядру нужны права для TUN и защиты от утечек")
++                    Elevated(listOf(out), stop, LinuxElevation::cancelled, "Нет разрешения администратора: полный туннель не запущен")
+                 } else {
+                     val out = output(".log")
+                     command = MacElevation.command(command, out, stop, app)
+@@ -252,6 +258,7 @@ class CoreConnectionService(
+         // macOS: root comes with each start (MacElevation); Windows asks
+         // UAC for the core alone when OpenFlux is not elevated itself.
+         if (MacElevation.mac) return
++        if (LinuxElevation.linux) { LinuxElevation.checkRequirements(); return }
+         check(isWindows) { "Режим «Весь трафик» пока есть только в Windows и macOS" }
+         check(File(core.parentFile, "wintun.dll").isFile) {
+             "Рядом с ядром нет wintun.dll (${core.parentFile}): он нужен для режима «Весь трафик», см. scripts/build-core.sh"
+@@ -311,7 +318,7 @@ class CoreConnectionService(
+         // Without a Session's IPC status (classic profiles) the core's start
+         // banner is the only sign it is up; the tun client says it once the
+         // default route is in the tunnel.
+-        if (line.contains("Running as CLIENT") || line.contains("Running as EXIT NODE") || line.contains("Tunnel active")) {
++        if (readyBanner(line, run.settings.fullTunnel)) {
+             run.bannerSeen = true
+             if (!run.usesIpc || run.ipcUnavailable) markConnected(run)
+         }
+diff --git a/src/jvmMain/kotlin/io/openflux/desktop/core/TunnelReadiness.kt b/src/jvmMain/kotlin/io/openflux/desktop/core/TunnelReadiness.kt
+new file mode 100644
+index 0000000..290836a
+--- /dev/null
++++ b/src/jvmMain/kotlin/io/openflux/desktop/core/TunnelReadiness.kt
+@@ -0,0 +1,6 @@
++package io.openflux.desktop.core
++
++/** TUN is ready only after routes, DNS and leak protection succeeded. */
++internal fun readyBanner(line: String, fullTunnel: Boolean): Boolean =
++    if (fullTunnel) line.contains("Tunnel active")
++    else line.contains("Running as CLIENT") || line.contains("Running as EXIT NODE")
+diff --git a/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt b/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt
+index 951788c..c200094 100644
+--- a/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt
++++ b/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt
+@@ -49,9 +49,10 @@ class JvmPlatformServices(
+     override val coreVersion: String get() = coreVersionProvider()
+     override val clientRepo: String get() = RELEASE_REPO
+     override val systemProxySupported: Boolean = os.contains("win")
+-    override val fullTunnelSupported: Boolean = os.contains("win") || MacElevation.mac
+-    override val elevated: Boolean get() = if (MacElevation.mac) MacElevation.root else WindowsElevation.elevated
++    override val fullTunnelSupported: Boolean = os.contains("win") || MacElevation.mac || LinuxElevation.linux
++    override val elevated: Boolean get() = if (MacElevation.mac || LinuxElevation.linux) MacElevation.root else WindowsElevation.elevated
+     override val fullTunnelPrompt: String? get() = when {
++        LinuxElevation.linux && !LinuxElevation.root -> "при подключении Linux спросит пароль администратора"
+         MacElevation.mac && !MacElevation.root -> "при подключении macOS спросит пароль администратора"
+         WindowsCoreElevation.windows && !WindowsElevation.elevated -> "при подключении Windows попросит разрешение администратора"
+         else -> null
+diff --git a/src/jvmMain/kotlin/io/openflux/desktop/platform/LinuxElevation.kt b/src/jvmMain/kotlin/io/openflux/desktop/platform/LinuxElevation.kt
+new file mode 100644
+index 0000000..8ed59df
+--- /dev/null
++++ b/src/jvmMain/kotlin/io/openflux/desktop/platform/LinuxElevation.kt
+@@ -0,0 +1,23 @@
++package io.openflux.desktop.platform
++
++import java.io.File
++
++/** Elevate only the core. The GUI and private profiles remain user-owned. */
++object LinuxElevation {
++    val linux: Boolean = System.getProperty("os.name").lowercase().contains("linux")
++    val root: Boolean get() = MacElevation.root
++
++    fun command(core: List<String>, log: File, stop: File, appPid: Long): List<String> =
++        listOf("pkexec", "/bin/sh", "-c", MacElevation.watchScript(core, log, stop, appPid))
++
++    fun cancelled(line: String): Boolean = line.contains("Not authorized", ignoreCase = true) ||
++        line.contains("authentication", ignoreCase = true)
++
++    fun checkRequirements() {
++        for (tool in listOf("pkexec", "ip", "nft", "resolvectl")) {
++            val found = System.getenv("PATH").orEmpty().split(File.pathSeparator)
++                .plus(listOf("/usr/sbin", "/sbin")).any { File(it, tool).canExecute() }
++            check(found) { "Для полного туннеля Linux нужна программа $tool" }
++        }
++    }
++}
+diff --git a/src/jvmTest/kotlin/io/openflux/desktop/core/TunnelReadinessTest.kt b/src/jvmTest/kotlin/io/openflux/desktop/core/TunnelReadinessTest.kt
+new file mode 100644
+index 0000000..4eb439a
+--- /dev/null
++++ b/src/jvmTest/kotlin/io/openflux/desktop/core/TunnelReadinessTest.kt
+@@ -0,0 +1,14 @@
++package io.openflux.desktop.core
++
++import kotlin.test.Test
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class TunnelReadinessTest {
++    @Test fun tunnelWaitsForProtection() {
++        assertFalse(readyBanner("Running as CLIENT", true))
++        assertFalse(readyBanner("FATAL: configure default", true))
++        assertTrue(readyBanner("Tunnel active", true))
++        assertTrue(readyBanner("Running as CLIENT", false))
++    }
++}

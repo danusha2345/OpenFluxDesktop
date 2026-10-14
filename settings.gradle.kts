@@ -41,3 +41,8 @@ plugins {
 // the desktop app.
 include(":shared")
 include(":desktopApp")
+
+// Local, versioned fixes to the pinned upstream shared module.
+val sharedSync = ProcessBuilder("bash", File(settingsDir, "scripts/sync-shared.sh").absolutePath)
+    .directory(settingsDir).inheritIO().start()
+check(sharedSync.waitFor() == 0) { "Could not apply the verified shared module patch" }

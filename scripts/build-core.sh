@@ -70,6 +70,6 @@ if [ "$goos" = windows ]; then
 fi
 
 branch=$(git -C "$core" rev-parse --abbrev-ref HEAD)
-rev=$(git -C "$core" describe --always --dirty)
+rev=$(git -C "$core" describe --tags --match 'v*' --always --dirty)
 printf '%s@%s\n' "$branch" "$rev" > "$out/openflux-core.version"
 echo "core $(cat "$out/openflux-core.version") -> $out/$name"

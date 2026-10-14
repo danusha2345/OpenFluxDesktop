@@ -1,3 +1,26 @@
+## Наши исправления полного туннеля
+
+Linux: режим TUN с запросом прав только для ядра через pkexec; нужны ip,
+nft и systemd-resolved/resolvectl. Windows: WFP блокирует обход TUN.
+IPv6 в полном туннеле блокируется. SOCKS5/системный прокси охватывает только
+использующие его программы. Реальная проверка на Windows и Linux ещё нужна.
+
+Исправления общего модуля хранятся в patches/shared-full-tunnel.patch.
+Gradle автоматически проверяет закреплённую ревизию shared и применяет патч;
+чужие конфликтующие изменения не перезаписываются. Ядро закреплено в
+core-revision.txt; перед сборкой выполните scripts/sync-core.sh.
+
+# Наш выпуск 2.6.4
+
+Основан на upstream 2.6.3. Ядро закреплено в `core-revision.txt`:
+Session/AES-GCM, Avito/Cups/Direct, DNS через туннель, защита приватных назначений.
+Перед сборкой: `scripts/sync-core.sh`, затем команды ниже.
+Старые `openflux://noise-v1/` не подходят; нужен новый профиль `openflux://v1/`.
+Личные ссылки и секреты в репозиторий и релизы не включаются.
+
+Релизы публикуются после локальных проверок; автоматическая публикация по tag
+выключена, workflow Release можно запустить вручную.
+
 # OpenFluxDesktop
 
 Desktop client for [OpenFlux](https://github.com/p1neappleXpress/OpenFlux)

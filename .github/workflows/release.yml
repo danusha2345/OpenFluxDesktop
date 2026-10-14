@@ -5,8 +5,6 @@ name: Release
 # packages as a GitHub release. "Run workflow" builds them as artifacts
 # without publishing, for a dry run.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       publish:
@@ -75,6 +73,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+
+      - name: Select pinned fork core
+        run: bash scripts/sync-core.sh
 
       - name: Version
         id: version

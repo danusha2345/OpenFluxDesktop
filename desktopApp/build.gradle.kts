@@ -76,6 +76,11 @@ abstract class PrepareCore @Inject constructor(private val exec: ExecOperations)
             )
         val source = sourceDirs.get().firstOrNull { File(it, "go.mod").isFile } ?: clone()
         logger.lifecycle("Собираю ядро OpenFlux ($coreName) из ${source.path}, $go")
+        if (!project.hasProperty("coreDir")) {
+            val expected = project.rootProject.file("core-revision.txt").readText().trim()
+            val actual = run(source, "git", "rev-parse", "HEAD")
+            if (actual != expected) throw GradleException("Ядро не соответствует core-revision.txt; выполните scripts/sync-core.sh")
+        }
         val target = File(out, coreName)
         exec.exec {
             workingDir = source
@@ -98,7 +103,10 @@ abstract class PrepareCore @Inject constructor(private val exec: ExecOperations)
         dir.deleteRecursively()
         val url = "https://github.com/${repository.get()}"
         logger.lifecycle("Скачиваю исходники ядра: $url (${ref.get()})")
-        exec.exec { commandLine("git", "clone", "--depth", "1", "-b", ref.get(), url, dir.absolutePath) }
+        exec.exec { commandLine("git", "init", dir.absolutePath) }
+        exec.exec { workingDir = dir; commandLine("git", "remote", "add", "origin", url) }
+        exec.exec { workingDir = dir; commandLine("git", "fetch", "--depth", "1", "origin", ref.get()) }
+        exec.exec { workingDir = dir; commandLine("git", "checkout", "--detach", "FETCH_HEAD") }
         return dir
     }
 
@@ -155,8 +163,8 @@ val prepareCore by tasks.registering(PrepareCore::class) {
             rootDir.resolve("../OpenFlux"),
         ),
     )
-    repository.set(providers.gradleProperty("coreRepo").orElse("p1neappleXpress/OpenFlux"))
-    ref.set(providers.gradleProperty("coreRef").orElse("main"))
+    repository.set(providers.gradleProperty("coreRepo").orElse("danusha2345/OpenFlux"))
+    ref.set(providers.gradleProperty("coreRef").orElse(rootDir.resolve("core-revision.txt").readText().trim()))
     val skip = findProperty("skipCore") == "true"
     onlyIf { !skip && missing }
 }
