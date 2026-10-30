@@ -1,3 +1,13 @@
+# Выпуск форка 3.7.1
+
+Основа: Desktop/shared 3.7.0; ядро 0.17.1-danik.1. Сохранены защита TUN
+Windows/Linux, проверка готовности полного туннеля, повторное открытие окна
+и обновления из нашего форка. Перед сборкой выполнить `scripts/sync-core.sh`;
+patch общего модуля применяется через `scripts/sync-shared.sh`.
+Linux package собирается из исходников. Windows portable использует проверенный
+runtime upstream 3.7.0 с пересобранными desktop/shared jars и нашим ядром;
+installer сохраняет пользовательские профили. Windows acceptance не выполнялся.
+
 Windows 2.6.4: для исправления ошибки WFP «The specified group does not exist»
 выберите исправленное отдельное ядро из [hotfix 0.7.3-danik.2](https://github.com/danusha2345/OpenFlux/releases/tag/v0.7.3-danik.2)
 в настройках собственного пути ядра. Профили и ключ менять не нужно.
@@ -14,10 +24,11 @@ Gradle автоматически проверяет закреплённую р
 чужие конфликтующие изменения не перезаписываются. Ядро закреплено в
 core-revision.txt; перед сборкой выполните scripts/sync-core.sh.
 
-# Наш выпуск 2.6.4
+# Наш выпуск 3.7.1
 
-Основан на upstream 2.6.3. Ядро закреплено в `core-revision.txt`:
-Session/AES-GCM, Avito/Cups/Direct, DNS через туннель, защита приватных назначений.
+Основан на upstream 3.7.0. Ядро закреплено в `core-revision.txt`:
+Ядро 0.17.1-danik.1: Session/AES-GCM, Avito/Cups/Direct, DNS через туннель, защита приватных назначений.
+Go 1.26.10, исправления MAX и восстановления Avito; обновлённый общий UI 3.7.0.
 Перед сборкой: `scripts/sync-core.sh`, затем команды ниже.
 Старые `openflux://noise-v1/` не подходят; нужен новый профиль `openflux://v1/`.
 Личные ссылки и секреты в репозиторий и релизы не включаются.

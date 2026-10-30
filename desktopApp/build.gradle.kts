@@ -15,8 +15,28 @@ kotlin {
     jvmToolchain(17)
 }
 
-/** The app version: -PappVersion=1.2.3 (the release workflow passes the tag). */
-val appVersion = (findProperty("appVersion") as String?)?.removePrefix("v")?.takeIf { it.isNotBlank() } ?: "2.0.0"
+/** The latest release tag reachable from this checkout (v3.4.1 -> 3.4.1), for a local run; null without git or tags. */
+fun latestReleaseTag(): String? = runCatching {
+    providers.exec {
+        commandLine("git", "describe", "--tags", "--match", "v[0-9]*", "--abbrev=0")
+        isIgnoreExitValue = true
+    }.standardOutput.asText.get().trim().removePrefix("v").takeIf { Regex("""\d+\.\d+\.\d+""").matches(it) }
+}.getOrNull()
+
+/** The app version: -PappVersion=1.2.3 (the release workflow passes the tag); a local run takes the latest tag. */
+val appVersion = (findProperty("appVersion") as String?)?.removePrefix("v")?.takeIf { it.isNotBlank() } ?: latestReleaseTag() ?: "2.0.0"
+
+/** The id that names this build to the OpenFlux service (an identifier, not a secret): -Popenflux.appId=ofa_… or OPENFLUX_APP_ID. */
+val appId = ((findProperty("openflux.appId") as String?) ?: System.getenv("OPENFLUX_APP_ID")).orEmpty().trim()
+
+val writeAppId by tasks.registering {
+    val out = layout.buildDirectory.file("generated/appid/openflux-appid.txt")
+    inputs.property("appId", appId)
+    outputs.file(out)
+    doLast { out.get().asFile.apply { parentFile.mkdirs() }.writeText(appId) }
+}
+sourceSets.main { resources.srcDir(layout.buildDirectory.dir("generated/appid")) }
+tasks.named("processResources") { dependsOn(writeAppId) }
 
 dependencies {
     implementation(project(":shared"))
@@ -27,9 +47,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.swing)
     implementation(libs.compose.components.resources)
     testImplementation(libs.kotlin.testJunit)
-    // The README demos drive the real screens (DemoRecorder, OPENFLUX_DEMO=<dir>).
-    @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
-    testImplementation(compose.uiTest)
 }
 
 /**
@@ -58,13 +75,26 @@ abstract class PrepareCore @Inject constructor(private val exec: ExecOperations)
     @get:Internal val missing: Boolean
         get() {
             val out = outDir.get().asFile
-            return !File(out, coreName).isFile || (goos.get() == "windows" && !File(out, "wintun.dll").isFile)
+            return !File(out, coreName).isFile || (goos.get() == "windows" && !File(out, "wintun.dll").isFile) || stale()
         }
+
+    /**
+     * A core built earlier from another commit of the source than the one checked out now (the submodule moved):
+     * a local run would keep an old core that cannot read newer links. CI builds its own, it is never stale here.
+     */
+    private fun stale(): Boolean {
+        if (System.getenv("CI") != null) return false
+        val source = sourceDirs.get().firstOrNull { File(it, "go.mod").isFile } ?: return false
+        val branch = runCatching { run(source, "git", "rev-parse", "--abbrev-ref", "HEAD") }.getOrNull() ?: return false
+        val rev = runCatching { run(source, "git", "describe", "--always", "--dirty") }.getOrNull() ?: return false
+        val file = File(outDir.get().asFile, "openflux-core.version")
+        return !file.isFile || file.readText().trim() != "$branch@$rev"
+    }
 
     @TaskAction
     fun prepare() {
         val out = outDir.get().asFile.apply { mkdirs() }
-        if (!File(out, coreName).isFile) buildCore(out)
+        if (!File(out, coreName).isFile || stale()) buildCore(out)
         if (goos.get() == "windows" && !File(out, "wintun.dll").isFile) wintun(out)
     }
 
@@ -192,7 +222,7 @@ compose.desktop {
             // The core (and wintun.dll on Windows) in resources/<windows|macos|linux>,
             // put there by scripts/build-core.sh or the release workflow.
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
-            modules("java.instrument", "java.management", "java.net.http", "jdk.crypto.ec", "jdk.unsupported")
+            modules("java.instrument", "java.management", "java.net.http", "jdk.crypto.ec", "jdk.httpserver", "jdk.unsupported")
 
             windows {
                 menuGroup = "OpenFlux"
