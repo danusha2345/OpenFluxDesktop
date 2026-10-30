@@ -1,8 +1,150 @@
+diff --git a/src/commonMain/kotlin/io/openflux/app/settings/SettingsScreens.kt b/src/commonMain/kotlin/io/openflux/app/settings/SettingsScreens.kt
+index 2343cf8..60d5e98 100644
+--- a/src/commonMain/kotlin/io/openflux/app/settings/SettingsScreens.kt
++++ b/src/commonMain/kotlin/io/openflux/app/settings/SettingsScreens.kt
+@@ -195,6 +195,7 @@ private fun VpnPage() {
+             Toggle("Весь трафик компьютера (TUN)", settings.fullTunnel, ::setFull, subtitle = "Программы, игры и UDP идут через ноду; $rights")
+         }
+     }
++    if (platform.vpnBypassSupported) VpnBypassSettings()
+     if (!platform.systemProxySupported) {
+         Text(
+             "Системный прокси есть только в Windows. Укажите SOCKS5 127.0.0.1:${settings.socksPort} в нужных программах" + if (platform.fullTunnelSupported) " или включите TUN." else ".",
+@@ -444,3 +445,39 @@ private fun AboutPage() {
+         style = AppTheme.type.bodySmall, color = AppTheme.colors.textMuted,
+     )
+ }
++
++/** The list is OS-local: the server and shared connection links carry no application rules. */
++@Composable
++private fun VpnBypassSettings() {
++    val container = LocalAppContainer.current
++    val settings by container.settings.settings.collectAsState()
++    val scope = rememberCoroutineScope()
++    val platform = container.platform
++    Section("Исключения из VPN") {
++        Toggle("Локальная сеть", settings.bypassLAN, { v -> container.settings.update { it.copy(bypassLAN = v) } },
++            subtitle = "Роутер, NAS, принтеры и другие устройства в домашних и офисных подсетях")
++    }
++    Field(settings.bypassDomains, { v -> container.settings.update { it.copy(bypassDomains = v) } },
++        "Сайты вне VPN", singleLine = false, placeholder = "example.com\nbank.ru")
++    Text("По одному домену на строке, без https:// и пути. Поддомены включаются автоматически. Для этих правил отключите защищённый DNS (DoH) в браузере.",
++        style = AppTheme.type.bodySmall, color = AppTheme.colors.textSecondary)
++    if (platform.applicationBypassSupported) {
++        Section("Приложения вне VPN") {
++            for (path in settings.bypassApps) {
++                ValueRow(path.substringAfterLast('\\').substringAfterLast('/'), path, mono = true)
++                TextAction("Убрать из исключений", { container.settings.update { it.copy(bypassApps = it.bypassApps - path) } })
++            }
++        }
++        SecondaryButton("Добавить приложение (.exe)", {
++            scope.launch {
++                platform.pickFile("Приложение вне VPN", listOf("exe"))?.let { path ->
++                    container.settings.update { it.copy(bypassApps = (it.bypassApps + path).distinct()) }
++                }
++            }
++        })
++        Text("Можно выбрать любой торрент-клиент или другую программу. Её TCP и UDP идут напрямую независимо от портов и шифрования.",
++            style = AppTheme.type.bodySmall, color = AppTheme.colors.textSecondary)
++    }
++    Text("Исключения действуют в режиме «Весь трафик компьютера (TUN)». После изменения переподключитесь; при добавлении сайтов перезапустите браузер, чтобы сбросить его DNS-кэш.",
++        style = AppTheme.type.bodySmall, color = AppTheme.colors.textSecondary)
++}
+diff --git a/src/commonMain/kotlin/io/openflux/desktop/model/AppSettings.kt b/src/commonMain/kotlin/io/openflux/desktop/model/AppSettings.kt
+index b83a505..b5fceaa 100644
+--- a/src/commonMain/kotlin/io/openflux/desktop/model/AppSettings.kt
++++ b/src/commonMain/kotlin/io/openflux/desktop/model/AppSettings.kt
+@@ -93,6 +93,9 @@ data class AppSettings(
+      * Needs administrator rights.
+      */
+     val fullTunnel: Boolean = false,
++    val bypassLAN: Boolean = false,
++    val bypassDomains: String = "",
++    val bypassApps: List<String> = emptyList(),
+     val autoConnect: Boolean = false,
+     val selectedProfileId: String? = null,
+     val coreSource: CoreSource = CoreSource.Bundled,
+diff --git a/src/commonMain/kotlin/io/openflux/desktop/model/CoreConfig.kt b/src/commonMain/kotlin/io/openflux/desktop/model/CoreConfig.kt
+index 3396fd6..2ab5744 100644
+--- a/src/commonMain/kotlin/io/openflux/desktop/model/CoreConfig.kt
++++ b/src/commonMain/kotlin/io/openflux/desktop/model/CoreConfig.kt
+@@ -6,6 +6,7 @@ data class CorePaths(
+     val confFile: String,
+     val cookieStore: String,
+     val ipcSocket: String?,
++    val bypassConfig: String? = null,
+ )
+ 
+ /**
+@@ -69,10 +70,15 @@ object CoreConfig {
+         val socks = "$LOOPBACK:${settings.socksPort}"
+         val http = "$LOOPBACK:${settings.socksPort + 1}"
+         if (profile.stream) {
++            require(!settings.fullTunnel || !settings.vpnBypassConfig().enabled) { "Исключения VPN требуют обычного профиля с сервером" }
+             require(!exit) { "Режим без сервера работает только как клиент: выхода в нём нет, сервер заменяет PHP-хостинг" }
+             return stream(profile, settings, paths, socks, http)
+         }
+-        return if (profile.session) session(profile, settings, paths, exit, socks, http, scriptCarrier) else classic(profile, settings, paths, exit, socks, http)
++        val launch = if (profile.session) session(profile, settings, paths, exit, socks, http, scriptCarrier) else classic(profile, settings, paths, exit, socks, http)
++        return if (!exit && settings.fullTunnel && settings.vpnBypassConfig().enabled) {
++            require(paths.bypassConfig != null) { "Не подготовлен файл исключений VPN" }
++            launch.copy(arguments = launch.arguments + "--bypass-config=${paths.bypassConfig}")
++        } else launch
+     }
+ 
+     private fun session(
+diff --git a/src/commonMain/kotlin/io/openflux/desktop/model/VpnBypass.kt b/src/commonMain/kotlin/io/openflux/desktop/model/VpnBypass.kt
+new file mode 100644
+index 0000000..11d65bb
+--- /dev/null
++++ b/src/commonMain/kotlin/io/openflux/desktop/model/VpnBypass.kt
+@@ -0,0 +1,19 @@
++package io.openflux.desktop.model
++
++import kotlinx.serialization.Serializable
++
++/** Explicit client-side exceptions; empty settings preserve the normal fast TUN path. */
++@Serializable
++data class VpnBypassConfig(
++    val lan: Boolean = false,
++    val domains: List<String> = emptyList(),
++    val apps: List<String> = emptyList(),
++) {
++    val enabled: Boolean get() = lan || domains.isNotEmpty() || apps.isNotEmpty()
++}
++
++fun AppSettings.vpnBypassConfig() = VpnBypassConfig(
++    lan = bypassLAN,
++    domains = bypassDomains.lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
++    apps = bypassApps.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
++)
+diff --git a/src/commonMain/kotlin/io/openflux/desktop/service/Services.kt b/src/commonMain/kotlin/io/openflux/desktop/service/Services.kt
+index 936f4b5..d186346 100644
+--- a/src/commonMain/kotlin/io/openflux/desktop/service/Services.kt
++++ b/src/commonMain/kotlin/io/openflux/desktop/service/Services.kt
+@@ -170,6 +170,8 @@ interface PlatformServices {
+     /** Whether this OS can point its system proxy at OpenFlux. */
+     val systemProxySupported: Boolean
+     /** Whether the full tunnel (all traffic through Wintun on Windows, utun on macOS) runs on this OS. */
++    val vpnBypassSupported: Boolean get() = false
++    val applicationBypassSupported: Boolean get() = false
+     val fullTunnelSupported: Boolean
+     /** Whether OpenFlux runs with administrator rights, which the full tunnel needs. */
+     val elevated: Boolean
 diff --git a/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt b/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt
-index b00dcff..6a5942d 100644
+index b00dcff..06d3de7 100644
 --- a/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt
 +++ b/src/jvmMain/kotlin/io/openflux/desktop/core/CoreConnectionService.kt
-@@ -7,6 +7,7 @@ import io.openflux.desktop.data.restrictToOwner
+@@ -1,12 +1,16 @@
+ package io.openflux.desktop.core
+ 
+ import io.openflux.desktop.model.SetupPages
++import io.openflux.desktop.model.vpnBypassConfig
++import kotlinx.serialization.encodeToString
++import kotlinx.serialization.json.Json
+ 
+ import io.openflux.desktop.data.AppDirs
+ import io.openflux.desktop.data.restrictToOwner
  import io.openflux.desktop.model.AppSettings
  import io.openflux.desktop.model.CaptchaPrompt
  import io.openflux.app.platform.BrowserPage
@@ -10,7 +152,27 @@ index b00dcff..6a5942d 100644
  import io.openflux.desktop.platform.MacElevation
  import io.openflux.desktop.platform.WindowsCoreElevation
  import io.openflux.desktop.platform.WindowsElevation
-@@ -253,7 +254,7 @@ class CoreConnectionService(
+@@ -235,11 +239,19 @@ class CoreConnectionService(
+                 files += dir
+                 File(dir, "core.sock").also { files += it }
+             }
++            val bypass = current.vpnBypassConfig().takeIf { current.fullTunnel && current.mode == ConnectionMode.Client && it.enabled }?.let {
++                File(runtime, "bypass-$tag.json").also { f ->
++                    f.writeText(Json.encodeToString(it))
++                    restrictToOwner(f)
++                    files += f
++                }
++            }
+             val paths = CorePaths(
+                 keyFile = keyFile?.absolutePath,
+                 confFile = confFile.absolutePath,
+                 cookieStore = File(AppDirs.config, "cookies/$tag.json").also { it.parentFile.mkdirs() }.absolutePath,
+                 ipcSocket = ipcSocket?.absolutePath,
++                bypassConfig = bypass?.absolutePath,
+             )
+             val launch = CoreConfig.build(profile, current, paths, scripts::carrier)
+             if (current.useAccountSessions) {
+@@ -253,7 +265,7 @@ class CoreConnectionService(
              log(LogLevel.Info, "Запуск ядра: ${profile.name} (${current.mode.label}${if (current.mode == ConnectionMode.Exit) ", ${current.exitBackend.label}" else ""})")
              var command = listOf(core.absolutePath) + launch.arguments
              val elevate = (current.fullTunnel && current.mode == ConnectionMode.Client &&
@@ -19,7 +181,7 @@ index b00dcff..6a5942d 100644
                  (exitL3 && ExitL3.needsUac(System.getProperty("os.name"), WindowsElevation.elevated))
              val elevated = if (elevate) {
                  val stamp = System.currentTimeMillis()
-@@ -276,6 +277,11 @@ class CoreConnectionService(
+@@ -276,6 +288,11 @@ class CoreConnectionService(
                          log(LogLevel.Info, "Windows попросит разрешение администратора: ядру нужны права для адаптера Wintun и маршрутов")
                          Elevated(listOf(out, err), stop, WindowsCoreElevation::cancelled, "Нет разрешения администратора: без него режим «Весь трафик» не запускается")
                      }
@@ -31,7 +193,7 @@ index b00dcff..6a5942d 100644
                  } else {
                      val out = output(".log")
                      command = MacElevation.command(command, out, stop, app)
-@@ -308,6 +314,7 @@ class CoreConnectionService(
+@@ -308,6 +325,7 @@ class CoreConnectionService(
          // macOS: root comes with each start (MacElevation); Windows asks
          // UAC for the core alone when OpenFlux is not elevated itself.
          if (MacElevation.mac) return
@@ -39,7 +201,7 @@ index b00dcff..6a5942d 100644
          check(isWindows) { "Режим «Весь трафик» пока есть только в Windows и macOS" }
          check(File(core.parentFile, "wintun.dll").isFile) {
              "Рядом с ядром нет wintun.dll (${core.parentFile}): он нужен для режима «Весь трафик», см. scripts/build-core.sh"
-@@ -369,7 +376,7 @@ class CoreConnectionService(
+@@ -369,7 +387,7 @@ class CoreConnectionService(
          // Without a Session's IPC status (classic profiles) the core's start
          // banner is the only sign it is up; the tun client says it once the
          // default route is in the tunnel.
@@ -61,15 +223,17 @@ index 0000000..290836a
 +    if (fullTunnel) line.contains("Tunnel active")
 +    else line.contains("Running as CLIENT") || line.contains("Running as EXIT NODE")
 diff --git a/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt b/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt
-index 8a4e0fb..a1b0aa9 100644
+index 8a4e0fb..d2278b1 100644
 --- a/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt
 +++ b/src/jvmMain/kotlin/io/openflux/desktop/platform/JvmPlatformServices.kt
-@@ -55,9 +55,10 @@ class JvmPlatformServices(
+@@ -55,9 +55,12 @@ class JvmPlatformServices(
              ?: System.getenv("COMPUTERNAME") ?: "Компьютер"
      override val clientRepo: String get() = RELEASE_REPO
      override val systemProxySupported: Boolean = os.contains("win")
 -    override val fullTunnelSupported: Boolean = os.contains("win") || MacElevation.mac
 -    override val elevated: Boolean get() = if (MacElevation.mac) MacElevation.root else WindowsElevation.elevated
++    override val vpnBypassSupported: Boolean = os.contains("win") || os.contains("linux")
++    override val applicationBypassSupported: Boolean = os.contains("win")
 +    override val fullTunnelSupported: Boolean = os.contains("win") || MacElevation.mac || LinuxElevation.linux
 +    override val elevated: Boolean get() = if (MacElevation.mac || LinuxElevation.linux) MacElevation.root else WindowsElevation.elevated
      override val fullTunnelPrompt: String? get() = when {
@@ -77,7 +241,7 @@ index 8a4e0fb..a1b0aa9 100644
          MacElevation.mac && !MacElevation.root -> "при подключении macOS спросит пароль администратора"
          WindowsCoreElevation.windows && !WindowsElevation.elevated -> "при подключении Windows попросит разрешение администратора"
          else -> null
-@@ -357,7 +358,7 @@ class JvmPlatformServices(
+@@ -357,7 +360,7 @@ class JvmPlatformServices(
  
      companion object {
          /** Where the desktop releases are published, tagged v1.2.3. */
@@ -114,6 +278,60 @@ index 0000000..8ed59df
 +            check(found) { "Для полного туннеля Linux нужна программа $tool" }
 +        }
 +    }
++}
+diff --git a/src/jvmTest/kotlin/io/openflux/desktop/CoreLinksContractTest.kt b/src/jvmTest/kotlin/io/openflux/desktop/CoreLinksContractTest.kt
+index 8518ed1..969f203 100644
+--- a/src/jvmTest/kotlin/io/openflux/desktop/CoreLinksContractTest.kt
++++ b/src/jvmTest/kotlin/io/openflux/desktop/CoreLinksContractTest.kt
+@@ -57,6 +57,7 @@ class CoreLinksContractTest {
+                 secret = secret, session = true, priority = 100,
+                 extras = listOf(ExtraTransport(TransportType.DIRECT, "1.2.3.4:8445", priority = 50)),
+             ),
++            Profile(id = "legacy", name = "Старый контекст", transport = TransportType.DIRECT, value = "203.0.113.7:8445", secret = secret, session = true, context = "kept-legacy-context"),
+             Profile(id = "b", name = "Классика", transport = TransportType.MAILRU, value = "https://cloud.mail.ru/public/Ab/Cd", secret = secret),
+             Profile(id = "c", name = "Без ключа", transport = TransportType.VYANDEX, value = "https://disk.yandex.ru/i/open"),
+         )
+@@ -64,7 +65,7 @@ class CoreLinksContractTest {
+             val link = codec.encode(profile.toShare().getOrThrow())
+             val back = Profile.fromShare(codec.decode(link), profile.id, 0, ProfileSource.Qr)
+             // The core names the context of a Session link by its rule.
+-            val context = if (profile.session) profile.value else ""
++            val context = if (profile.session) profile.context.ifBlank { "http://#" } else ""
+             assertEquals(profile.copy(context = context, source = ProfileSource.Qr), back, profile.name)
+         }
+     }
+diff --git a/src/jvmTest/kotlin/io/openflux/desktop/VpnBypassTest.kt b/src/jvmTest/kotlin/io/openflux/desktop/VpnBypassTest.kt
+new file mode 100644
+index 0000000..1cc66f7
+--- /dev/null
++++ b/src/jvmTest/kotlin/io/openflux/desktop/VpnBypassTest.kt
+@@ -0,0 +1,27 @@
++package io.openflux.desktop
++import io.openflux.desktop.model.*
++import kotlinx.serialization.encodeToString
++import kotlinx.serialization.json.Json
++import kotlin.test.*
++class VpnBypassTest {
++ private val profile = Profile(id="p",name="Node",transport=TransportType.DIRECT,value="203.0.113.1:8445",secret="f".repeat(64),session=true)
++ private val paths = CorePaths("key","profile.conf","cookies.json","ipc.sock","C:/Run/bypass.json")
++ @Test fun oldSettingsStayDisabledAndNewRulesRoundTrip() {
++  assertFalse(Json.decodeFromString<AppSettings>("{}").vpnBypassConfig().enabled)
++  val settings=AppSettings(fullTunnel=true,bypassLAN=true,bypassDomains="bank.test\n  example.test \n\n",bypassApps=listOf("C:\\Any Torrent\\client.exe"))
++  val round=Json.decodeFromString<AppSettings>(Json.encodeToString(settings))
++  assertEquals(settings,round)
++  val config=round.vpnBypassConfig();assertEquals(listOf("bank.test","example.test"),config.domains)
++  assertTrue(config.lan);assertEquals(settings.bypassApps,config.apps)
++  val raw=Json.encodeToString(config);assertFalse("enabled" in raw)
++  assertEquals(config,Json.decodeFromString<VpnBypassConfig>(raw))
++ }
++ @Test fun exceptionsRequireFullTunnelAndAreNeverSentToTheExit() {
++  val settings=AppSettings(fullTunnel=true,bypassLAN=true)
++  val launch=CoreConfig.build(profile,settings,paths)
++  assertTrue("--bypass-config=C:/Run/bypass.json" in launch.arguments)
++  assertFalse("bypass" in launch.conf!!.lowercase())
++  assertFalse(CoreConfig.build(profile,settings.copy(fullTunnel=false),paths).arguments.any{it.startsWith("--bypass-config")})
++  assertFailsWith<IllegalArgumentException>{CoreConfig.build(profile,settings,paths.copy(bypassConfig=null))}
++ }
 +}
 diff --git a/src/jvmTest/kotlin/io/openflux/desktop/core/TunnelReadinessTest.kt b/src/jvmTest/kotlin/io/openflux/desktop/core/TunnelReadinessTest.kt
 new file mode 100644

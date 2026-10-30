@@ -30,7 +30,7 @@ Section "OpenFlux"
  CreateDirectory "$SMPROGRAMS\OpenFlux"
  CreateShortcut "$SMPROGRAMS\OpenFlux\OpenFlux.lnk" "$INSTDIR\OpenFlux.exe"
  CreateShortcut "$SMPROGRAMS\OpenFlux\Удалить.lnk" "$INSTDIR\Uninstall.exe"
- WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenFluxModern" "DisplayName" "OpenFlux 3.7.1"
+ WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenFluxModern" "DisplayName" "OpenFlux 3.7.2"
  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenFluxModern" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 !include "${UNINSTALL_MANIFEST}"
